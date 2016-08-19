@@ -37,10 +37,30 @@ local function read_one(tokens)
     return token
 end
 
-local function read_array(tokens, interpret_value, read_value, read_table)
+local function raise_err_unclosed(messasge, source, start)
+    local col, row = toto.debug.get_position(source, start)
+    local message = string.format(message, col, row)
+    print(message)
+    toto.debug.show_unclosed(source, start)
+    error(message)
+end
+
+local function raise_err_invalid_part(message, source, start, pos)
+    local col, row = toto.debug.get_position(source, start)
+    local message = string.format(message, col, row)
+    print(message)
+    toto.debug.show_invalid_part(source, start, pos)
+    error(message)
+end
+
+local function read_array(tokens, source, interpret_value, read_value, read_table)
     local expect_value = true
     local array = {}
+    local start
     for token in tokens do
+        if start == nil then
+            start = token.start
+        end
         --print("Array Token: "..TokenType:name(token.type))
         if token.type ~= TokenType.Newline then
             if token.type == TokenType.SingleBracketClose then
@@ -51,19 +71,19 @@ local function read_array(tokens, interpret_value, read_value, read_table)
                 end
                 expect_value = true
             else
-                local value = interpret_value(token, tokens, read_value, read_table)
+                local value = interpret_value(token, tokens, source, read_value, read_table)
                 table.insert(array, value)
                 expect_value = false
             end
         end
     end
-    local dalgi = require("dalgi")
-    print("Array:")
-    dalgi.print(array)
-    error("Unclosed array! (Unreachable)")
+    if start == nil then -- This is the last token
+        start = source:len() - 1
+    end
+    raise_err_unclosed("Unclosed array at %d:%d", source, start)
 end
 
-local function interpret_value(token, tokens, read_value, read_table)
+local function interpret_value(token, tokens, source, read_value, read_table)
     if token.type == TokenType.String then
         return clean_string(token.text)
     
@@ -92,16 +112,16 @@ local function interpret_value(token, tokens, read_value, read_table)
         return false
     
     elseif token.type == TokenType.SingleBracketOpen then
-        return read_array(tokens, interpret_value, read_value, read_table)
+        return read_array(tokens, source, interpret_value, read_value, read_table)
     
     elseif token.type == TokenType.CurlyOpen then
-        return read_table(tokens, true)
+        return read_table(tokens, source, true)
     end
 end
 
-local function read_value(tokens, read_table)
+local function read_value(tokens, source, read_table)
     local first = read_one(tokens)
-    return interpret_value(first, tokens, read_value, read_table)
+    return interpret_value(first, tokens, source, read_value, read_table)
 end
 
 local function read_newline(tokens)
@@ -114,21 +134,22 @@ local function read_newline(tokens)
     end
 end
 
-local function read_entry(tokens, inline, read_table)
+local function read_entry(tokens, source, inline, read_table)
     local eq = tokens()
     if eq.type ~= TokenType.Equals then
         error("No equals sign found")
     end
-    local value = read_value(tokens, read_table)
+    local value = read_value(tokens, source, read_table)
     if not inline then
         read_newline(tokens)
     end
     return value
 end
 
-local function read_scope(tokens, is_array_of_tables)
+local function read_scope(tokens, source, is_array_of_tables)
     local scope = {}
     local expect_key = true
+    local start
     
     local function insert(key)
         if not expect_key then
@@ -139,6 +160,9 @@ local function read_scope(tokens, is_array_of_tables)
     end
     
     for token in tokens do
+        if start == nil then
+            start = token.start
+        end
         if token.type == TokenType.Key then
             insert(token.text)
         
@@ -163,19 +187,25 @@ local function read_scope(tokens, is_array_of_tables)
         elseif token.type == TokenType.Whitespace then
         
         elseif token.type == TokenType.SingleBracketClose and not is_array_of_tables then
+            if expect_key then
+                raise_err_invalid_part("Expected key in scope at %d:%d", source, start, token.start)
+            end
             read_newline(tokens)
             return scope
         
         elseif token.type == TokenType.DoubleBracketClose and is_array_of_tables then
+            if expect_key then
+                raise_err_invalid_part("Expected key in scope at %d:%d", source, start, token.start)
+            end
             read_newline(tokens)
             return scope
         else
-            error("Unexpected item in scope: '"..TokenType:name(token.type).."'")
+            raise_err_invalid_part("Unexpected item in scope at %d:%d", source, start, token.start)
         end
     end
 end
 
-local function read_table(tokens, inline)
+local function read_table(tokens, source, inline)
     local top_table = {}
     local cur_table = top_table
     local expect_key = true
@@ -184,7 +214,7 @@ local function read_table(tokens, inline)
         if not expect_key then
             error("Expected comma before key in inline table")
         end
-        local value = read_entry(tokens, inline, read_table)
+        local value = read_entry(tokens, source, inline, read_table)
         if cur_table[key] ~= nil then -- TODO better error from clib
             error("Key '"..key.."' defined twice!")
         end
@@ -205,7 +235,7 @@ local function read_table(tokens, inline)
         if not inline then
             if token.type == TokenType.SingleBracketOpen then
                 cur_table = top_table
-                local scope = read_scope(tokens, false)
+                local scope = read_scope(tokens, source, false)
                 --print("Scope: "..dalgi.prettify(scope))
                 for _, part in ipairs(scope) do
                     local existing = cur_table[part]
@@ -223,7 +253,7 @@ local function read_table(tokens, inline)
                 
             elseif token.type == DoubleBracketOpen then
                 cur_table = top_table
-                local scope = read_scope(tokens, true)
+                local scope = read_scope(tokens, source, true)
                 --print("Scope: "..dalgi.prettify(scope))
                 for _, part in ipairs(scope) do
                     local existing = cur_table[part]
@@ -283,9 +313,9 @@ local function read_table(tokens, inline)
     return top_table
 end
 
-local function loads(text)
-    local tokens = toto.stripped_tokens(text)
-    return read_table(tokens, false)
+local function loads(source)
+    local tokens = toto.stripped_tokens(source)
+    return read_table(tokens, source, false)
 end
 
 return {

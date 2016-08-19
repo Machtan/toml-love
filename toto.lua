@@ -5,8 +5,8 @@ typedef struct {} Tokens;
 typedef struct {} TokenError;
 int32_t toto_tokenizer_new(const char* source, Tokens** tokenizer);
 int32_t toto_tokenizer_next(Tokens* tokenizer, int32_t* token_type,
-    int32_t* has_text, const char** text, size_t* len, int32_t* has_error,
-    TokenError** error);
+    int32_t* has_text, const char** text, size_t* len, size_t* start, 
+    int32_t* has_error, TokenError** error);
 int32_t toto_tokenizer_destroy(Tokens* tokenizer);
 int32_t toto_error_explain(TokenError* error, const char* source);
 int32_t toto_error_destroy(TokenError* error);
@@ -130,12 +130,12 @@ function Tokens:next()
     local token_type = ffi.new("int32_t[1]")
     local has_text = ffi.new("int32_t[1]")
     local text = ffi.new("const char*[1]")
-    local len = ffi.new("size_t[1]", {})
-    local has_error = ffi.new("int32_t[1]", {})
-    local err = ffi.new("TokenError[1]", {})
-    local errptr = ffi.new("TokenError*[1]", {err})
+    local len = ffi.new("size_t[1]")
+    local start = ffi.new("size_t[1]")
+    local has_error = ffi.new("int32_t[1]")
+    local errptr = ffi.new("TokenError*[1]")
     local res = toto.toto_tokenizer_next(self.raw, token_type, has_text, text, 
-        len, has_error, errptr)
+        len, start, has_error, errptr)
     if res == 0 then
         local token_text
         if has_text[0] ~= 0 then
@@ -146,6 +146,7 @@ function Tokens:next()
         return {
             type = tonumber(token_type[0]), 
             text = token_text,
+            start = tonumber(start[0]),
         }
     else
         self.finished = true
@@ -153,8 +154,8 @@ function Tokens:next()
         if res == -2 then
             error("The tokenizer was null")
         elseif has_error[0] ~= 0 then
-            toto.toto_error_explain(err, self.source)
-            toto.toto_error_destroy(err)
+            toto.toto_error_explain(errptr[0], self.source)
+            toto.toto_error_destroy(errptr[0])
             error("Tokens error")
         else
             return nil
