@@ -29,15 +29,16 @@ local function clean_string(text)
     return text
 end
 
-local function read_one(tokens)
+local function read_one(tokens, source)
     local token = tokens()
     if token == nil then
-        error("No more tokens")
+        raise_err_invalid_pos("%d:%d: Expected one more token:",
+            source, source:len())
     end
     return token
 end
 
-local function raise_err_unclosed(messasge, source, start)
+local function raise_err_unclosed(message, source, start)
     local col, row = toto.debug.get_position(source, start)
     local message = string.format(message, col, row)
     print(message)
@@ -50,6 +51,14 @@ local function raise_err_invalid_part(message, source, start, pos)
     local message = string.format(message, col, row)
     print(message)
     toto.debug.show_invalid_part(source, start, pos)
+    error(message)
+end
+
+local function raise_err_invalid_pos(message, source, pos)
+    local col, row = toto.debug.get_position(source, start)
+    local message = string.format(message, col, row)
+    print(message)
+    toto.debug.show_invalid_character(source, pos)
     error(message)
 end
 
@@ -67,7 +76,8 @@ local function read_array(tokens, source, interpret_value, read_value, read_tabl
                 return array
             elseif token.type == TokenType.Comma then
                 if expect_value then
-                    error("Found comma after comma!")
+                    raise_err_invalid_pos("%d:%d: Expected key after comma:",
+                        source, token.start)
                 end
                 expect_value = true
             else
@@ -80,7 +90,7 @@ local function read_array(tokens, source, interpret_value, read_value, read_tabl
     if start == nil then -- This is the last token
         start = source:len() - 1
     end
-    raise_err_unclosed("Unclosed array at %d:%d", source, start)
+    raise_err_unclosed("%d:%d: Unclosed array:", source, start)
 end
 
 local function interpret_value(token, tokens, source, read_value, read_table)
@@ -120,28 +130,34 @@ local function interpret_value(token, tokens, source, read_value, read_table)
 end
 
 local function read_value(tokens, source, read_table)
-    local first = read_one(tokens)
+    local first = read_one(tokens, source)
     return interpret_value(first, tokens, source, read_value, read_table)
 end
 
-local function read_newline(tokens)
+local function read_newline(tokens, source)
+    local start
     for token in tokens do
+        if start == nil then
+            start = token.start
+        end
         if token.type == TokenType.Newline then
             return
         else
-            error("Found unexpected token: '"..TokenType:name(token.type).."'")
+            raise_err_invalid_pos("%d:%d: Expected newline:",
+                source, start, token.start)
         end
     end
 end
 
 local function read_entry(tokens, source, inline, read_table)
-    local eq = tokens()
+    local eq = read_one()
     if eq.type ~= TokenType.Equals then
-        error("No equals sign found")
+        raise_err_invalid_part("%d:%d: Expected equals sign:",
+            source, start, cur_token.start)
     end
     local value = read_value(tokens, source, read_table)
     if not inline then
-        read_newline(tokens)
+        read_newlines(tokens, source)
     end
     return value
 end
@@ -151,15 +167,18 @@ local function read_scope(tokens, source, is_array_of_tables)
     local expect_key = true
     local start
     
+    local cur_token
     local function insert(key)
         if not expect_key then
-            error("Found key in scope without separator")
+            raise_err_invalid_part("%d:%d: Expected scope separator:",
+                source, start, cur_token.start)
         end
         table.insert(scope, key)
         expect_key = false
     end
     
     for token in tokens do
+        cur_token = token
         if start == nil then
             start = token.start
         end
@@ -180,7 +199,11 @@ local function read_scope(tokens, source, is_array_of_tables)
         
         elseif token.type == TokenType.Dot then
             if expect_key then
-                error("Found a dot not after a key")
+                if start == nil then
+                    start = source:len()
+                end
+                raise_err_invalid_part("%d:%d: Expected scope key:",
+                    source, start, token.start)
             end
             expect_key = true
         
@@ -188,19 +211,20 @@ local function read_scope(tokens, source, is_array_of_tables)
         
         elseif token.type == TokenType.SingleBracketClose and not is_array_of_tables then
             if expect_key then
-                raise_err_invalid_part("Expected key in scope at %d:%d", source, start, token.start)
+                raise_err_invalid_part("%d:%d: Expected key in scope:", source, start, token.start)
             end
-            read_newline(tokens)
+            read_newlines(tokens, source)
             return scope
         
         elseif token.type == TokenType.DoubleBracketClose and is_array_of_tables then
             if expect_key then
-                raise_err_invalid_part("Expected key in scope at %d:%d", source, start, token.start)
+                raise_err_invalid_part("%d:%d: Expected key in scope:", source, start, token.start)
             end
-            read_newline(tokens)
+            read_newlines(tokens, source)
             return scope
         else
-            raise_err_invalid_part("Unexpected item in scope at %d:%d", source, start, token.start)
+            raise_err_invalid_part("%d:%d: Unexpected item in scope:",
+                source, start, token.start)
         end
     end
 end
@@ -209,14 +233,18 @@ local function read_table(tokens, source, inline)
     local top_table = {}
     local cur_table = top_table
     local expect_key = true
+    local start
+    local cur_token
     
     local function insert(key)
         if not expect_key then
-            error("Expected comma before key in inline table")
+            raise_err_invalid_pos("%d:%d: Expected comma before key:",
+                source, cur_token.start or start)
         end
         local value = read_entry(tokens, source, inline, read_table)
         if cur_table[key] ~= nil then -- TODO better error from clib
-            error("Key '"..key.."' defined twice!")
+            raise_err_invalid_pos("%d:%d: Key '"..key.."' defined a second time:",
+                source, cur_token.start)
         end
         cur_table[key] = value
         if inline then
@@ -226,6 +254,10 @@ local function read_table(tokens, source, inline)
     end
     
     for token in tokens do
+        cur_token = token
+        if start == nil then
+            start = token.start
+        end
         local ty = TokenType:name(token.type)
         local text = (token.text or "")
         --print(string.format("%03d: "..ty..": '"..text.."'", i))
@@ -241,7 +273,8 @@ local function read_table(tokens, source, inline)
                     local existing = cur_table[part]
                     if existing ~= nil then
                         if type(existing) ~= "table" then
-                            error("The key '' is already in use") -- TODO
+                            raise_err_invalid_pos("%d:%d: Scope path member already in use:",
+                                source, token.start)
                         end
                     else
                         local new_table = {}
@@ -259,7 +292,8 @@ local function read_table(tokens, source, inline)
                     local existing = cur_table[part]
                     if existing ~= nil then
                         if type(existing) ~= "table" then
-                            error("The key '' is already in use") -- TODO
+                            raise_err_invalid_pos("%d:%d: Scope path member already in use:",
+                                source, token.start)
                         end
                     else
                         local new_table = {}
@@ -283,7 +317,8 @@ local function read_table(tokens, source, inline)
             
             elseif token.type == TokenType.Comma then
                 if expect_key then
-                    error("Expected key, not comma")
+                    raise_err_invalid_pos("%d:%d: Expected key after comma:",
+                        source, token.start)
                 end
                 expect_key = true
                 token_checked = true
@@ -307,8 +342,17 @@ local function read_table(tokens, source, inline)
             insert(token.text)
         
         elseif not token_checked then
-            error("Invalid table token: '"..TokenType:name(token.type).."'")
+            raise_err_invalid_pos(
+                "%d:%d: Invalid table token: '"..TokenType:name(token.type).."'",
+                source, token.start
+            )
         end
+    end
+    if inline then
+        if start == nil then
+            start = source:len() - 1
+        end
+        raise_err_unclosed("%d:%d: Unclosed inline table:", source, start)
     end
     return top_table
 end
