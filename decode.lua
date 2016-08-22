@@ -55,7 +55,7 @@ local function raise_err_invalid_part(message, source, start, pos)
 end
 
 local function raise_err_invalid_pos(message, source, pos)
-    local col, row = toto.debug.get_position(source, start)
+    local col, row = toto.debug.get_position(source, pos)
     local message = string.format(message, col, row)
     print(message)
     toto.debug.show_invalid_character(source, pos)
@@ -150,14 +150,14 @@ local function read_newline(tokens, source)
 end
 
 local function read_entry(tokens, source, inline, read_table)
-    local eq = read_one()
+    local eq = read_one(tokens, source)
     if eq.type ~= TokenType.Equals then
         raise_err_invalid_part("%d:%d: Expected equals sign:",
             source, start, cur_token.start)
     end
     local value = read_value(tokens, source, read_table)
     if not inline then
-        read_newlines(tokens, source)
+        read_newline(tokens, source)
     end
     return value
 end
@@ -213,14 +213,14 @@ local function read_scope(tokens, source, is_array_of_tables)
             if expect_key then
                 raise_err_invalid_part("%d:%d: Expected key in scope:", source, start, token.start)
             end
-            read_newlines(tokens, source)
+            read_newline(tokens, source)
             return scope
         
         elseif token.type == TokenType.DoubleBracketClose and is_array_of_tables then
             if expect_key then
                 raise_err_invalid_part("%d:%d: Expected key in scope:", source, start, token.start)
             end
-            read_newlines(tokens, source)
+            read_newline(tokens, source)
             return scope
         else
             raise_err_invalid_part("%d:%d: Unexpected item in scope:",
@@ -236,13 +236,13 @@ local function read_table(tokens, source, inline)
     local start
     local cur_token
     
-    local function insert(key)
+    local function insert(key, cur_table)
         if not expect_key then
             raise_err_invalid_pos("%d:%d: Expected comma before key:",
                 source, cur_token.start or start)
         end
         local value = read_entry(tokens, source, inline, read_table)
-        if cur_table[key] ~= nil then -- TODO better error from clib
+        if cur_table[key] ~= nil then
             raise_err_invalid_pos("%d:%d: Key '"..key.."' defined a second time:",
                 source, cur_token.start)
         end
@@ -250,7 +250,6 @@ local function read_table(tokens, source, inline)
         if inline then
             expect_key = false
         end
-        --print(key.." = "..dalgi.prettify(value))
     end
     
     for token in tokens do
@@ -268,13 +267,19 @@ local function read_table(tokens, source, inline)
             if token.type == TokenType.SingleBracketOpen then
                 cur_table = top_table
                 local scope = read_scope(tokens, source, false)
-                --print("Scope: "..dalgi.prettify(scope))
+                --print("Scope: "..table.concat(scope, "."))
                 for _, part in ipairs(scope) do
                     local existing = cur_table[part]
                     if existing ~= nil then
                         if type(existing) ~= "table" then
                             raise_err_invalid_pos("%d:%d: Scope path member already in use:",
                                 source, token.start)
+                        end
+                        if #existing > 0 then
+                            print(string.format("'%s' is an array! (len %d)", part, #existing))
+                            cur_table = existing[#existing]
+                        else
+                            cur_table = existing
                         end
                     else
                         local new_table = {}
@@ -284,28 +289,49 @@ local function read_table(tokens, source, inline)
                 end
                 token_checked = true
                 
-            elseif token.type == DoubleBracketOpen then
+            elseif token.type == TokenType.DoubleBracketOpen then
                 cur_table = top_table
                 local scope = read_scope(tokens, source, true)
-                --print("Scope: "..dalgi.prettify(scope))
-                for _, part in ipairs(scope) do
+                --print("Scope: "..table.concat(scope, "."))
+                for i, part in ipairs(scope) do
+                    local is_last = (i == #scope)
                     local existing = cur_table[part]
-                    if existing ~= nil then
-                        if type(existing) ~= "table" then
-                            raise_err_invalid_pos("%d:%d: Scope path member already in use:",
-                                source, token.start)
+                    if not is_last then
+                        if existing ~= nil then
+                            if type(existing) ~= "table" then
+                                raise_err_invalid_pos("%d:%d: Scope path member already in use:",
+                                    source, token.start)
+                            end
+                            if #existing > 0 then
+                                cur_table = existing[#existing]
+                            else
+                                cur_table = existing
+                            end
+                        else
+                            local new_table = {}
+                            cur_table[part] = new_table
+                            cur_table = new_table
                         end
                     else
-                        local new_table = {}
-                        cur_table[part] = new_table
-                        cur_table = new_table
+                        if existing ~= nil then
+                            if type(existing) ~= "table" then
+                                raise_err_invalid_pos("%d:%d: Scope path member already in use:",
+                                    source, token.start)
+                            end
+                            local element = {}
+                            table.insert(existing, element)
+                            cur_table = element
+                        else
+                            local arr = {}
+                            cur_table[part] = arr
+                            local first_element = {}
+                            arr[1] = first_element
+                            cur_table = first_element
+                        end
                     end
                 end
-                local new_element = {}
-                table.insert(cur_table, new_element)
-                cur_table = new_element
                 token_checked = true
-            
+                
             elseif token.type == TokenType.Newline then
                 token_checked = true
             end
@@ -327,19 +353,19 @@ local function read_table(tokens, source, inline)
         
         -- Check for key/value entries
         if token.type == TokenType.Key then
-            insert(token.text)
+            insert(token.text, cur_table)
         
         elseif token.type == TokenType.String then
-            insert(clean_string(token.text))
+            insert(clean_string(token.text), cur_table)
         
         elseif token.type == TokenType.MultilineString then
-            insert(clean_string(token.text))
+            insert(clean_string(token.text), cur_table)
         
         elseif token.type == TokenType.Literal then
-            insert(token.text)
+            insert(token.text, cur_table)
         
         elseif token.type == TokenType.MultilineLiteral then
-            insert(token.text)
+            insert(token.text, cur_table)
         
         elseif not token_checked then
             raise_err_invalid_pos(

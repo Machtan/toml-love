@@ -18,7 +18,7 @@ local function encode_string(text, append, collapse_newline)
 	text = text:gsub("\f", "\\f")
 	text = text:gsub("\r", "\\r")
 	text = text:gsub('"', '\\"')
-	text = text:gsub("/", "\\/")
+	text = text:gsub("\\", "\\\\")
     if collapse_newline then
         text = text:gsub("\n", "\\n")
         quote = '"'
