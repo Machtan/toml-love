@@ -276,7 +276,7 @@ local function read_table(tokens, source, inline)
                                 source, token.start)
                         end
                         if #existing > 0 then
-                            print(string.format("'%s' is an array! (len %d)", part, #existing))
+                            --print(string.format("'%s' is an array! (len %d)", part, #existing))
                             cur_table = existing[#existing]
                         else
                             cur_table = existing
